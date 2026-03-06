@@ -1,24 +1,30 @@
 """
 AskMovies Poster Bot
 ====================
-Monitors log channel → posts immediately to public channel.
-Each log message = ONE file at ONE quality with ONE inline button.
-Multiple messages for the same movie accumulate into one edited post.
+Monitors log channel → posts to public channel once the button arrives.
+
+How Telegram delivers log messages:
+  1. channel_post arrives  → text only, NO button yet
+  2. edited_channel_post   → same message, NOW has the inline button with the URL
+
+Strategy:
+  - On channel_post:       parse title/year/quality, store as "pending"
+  - On edited_channel_post: read the button URL, then post (or edit) the public channel
 
 Environment Variables:
   BOT_TOKEN          = Telegram bot token
   TMDB_API_KEY       = TMDB API key
-  LOG_CHANNEL_ID     = Log channel ID (the private log channel)
+  LOG_CHANNEL_ID     = Log channel ID (private log channel)
   PUBLIC_CHANNEL_ID  = Public destination channel ID
   FILESTORE_BOT      = Filestore bot username (without @)
   WEBHOOK_URL        = Koyeb app URL
 
-Log message format:
-  <filename line>         e.g.  Vladimir (2026) S01 720p TRUE WEB-DL.mkv
-  Quality : 720p
-  Lang : Tamil + Telugu
-  [Inline button]  label="Vladimir (2026) S01 720p.mkv"
-                   url="https://t.me/YourFilestoreBot?start=FILE_ID"
+Log message format (one message per quality):
+  [ASK] Granny (2026) Tamil TRUE WEB-DL 1080p AVC.mkv
+  Langauge : Tamil
+  Quality : 1080p
+  [Button added via edit]  label="Granny (2026) Tamil 1080p.mkv"
+                           url="https://Askmovies.lcubots.news/?start=fs_MjI2NzA="
 """
 
 import os
@@ -28,7 +34,12 @@ import asyncio
 
 import requests
 from telegram import Update, Message
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 from telegram.constants import ParseMode
 
 # ── Config ────────────────────────────────────────────────────
@@ -43,13 +54,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ── In-memory state ───────────────────────────────────────────
-# posted[movie_key] = {
-#   title, year, languages, quality_label, is_series, filename,
-#   files: [{display_name, quality, link, file_id}],
-#   batch_link, poster_url, message_id
-# }
+# pending[log_msg_id] = {title, year, quality_label, languages, is_series, filename}
+#   Stored on channel_post, consumed on edited_channel_post.
+pending: dict = {}
+
+# posted[movie_key] = {title, year, ..., files:[...], message_id, poster_url}
+#   One entry per unique movie — accumulates all quality variants.
 posted: dict = {}
-posted_lock  = asyncio.Lock()
+
+state_lock = asyncio.Lock()
 
 # ── Constants ─────────────────────────────────────────────────
 QUALITY_ORDER = {
@@ -64,8 +77,7 @@ LANG_MAP = {
 }
 
 QUALITY_RE = re.compile(r"\b(240p|360p|480p|720p|1080p|2160p|4K)\b", re.IGNORECASE)
-
-SOURCE_RE = re.compile(
+SOURCE_RE  = re.compile(
     r"\b(TRUE WEB-DL|WEB-DL|HQ HDRip|HDRip|BluRay|WEBRip|HDCAM|HQ|CAMRip)\b",
     re.IGNORECASE,
 )
@@ -80,30 +92,28 @@ def fetch_tmdb_poster(title: str, year: int | None = None) -> str | None:
         for endpoint in ("movie", "tv"):
             r = requests.get(
                 f"https://api.themoviedb.org/3/search/{endpoint}",
-                params=params,
-                timeout=10,
+                params=params, timeout=10,
             )
             r.raise_for_status()
             results = r.json().get("results", [])
             if results and results[0].get("poster_path"):
                 return f"https://image.tmdb.org/t/p/w500{results[0]['poster_path']}"
     except Exception as exc:
-        log.warning("TMDB lookup failed for %r: %s", title, exc)
+        log.warning("TMDB error for %r: %s", title, exc)
     return None
 
 
-# ── Helpers ───────────────────────────────────────────────────
+# ── Text helpers ──────────────────────────────────────────────
 def clean_first_line(raw: str) -> str:
-    """Strip [TAG] blocks and stray non-Latin characters."""
-    raw = re.sub(r"\[.*?\]", "", raw)
-    raw = re.sub(r"[^\x00-\u024F\s()\[\]\-_.]+", "", raw)
+    raw = re.sub(r"\[.*?\]", "", raw)                          # strip [ASK] tags
+    raw = re.sub(r"[^\x00-\u024F\s()\[\]\-_.]+", "", raw)     # strip emoji/non-Latin
     return raw.strip()
 
 
 def extract_title_year(filename: str) -> tuple[str, int | None]:
     YEAR_RE   = re.compile(r"\((\d{4})\)|\b(20\d{2})\b")
     SPLIT_PAT = re.compile(
-        r"\b(WEB-DL|HDRip|BluRay|WEBRip|HDCAM|480p|720p|1080p|4K|HQ|CAMRip)\b",
+        r"\b(WEB-DL|HDRip|BluRay|WEBRip|HDCAM|480p|720p|1080p|4K|HQ|CAMRip|TRUE)\b",
         re.IGNORECASE,
     )
     year: int | None = None
@@ -127,58 +137,17 @@ def quality_from_text(text: str) -> str:
 
 
 def file_id_from_url(url: str) -> str:
-    """Extract the start= parameter value as a stable dedup key."""
+    """Stable dedup key — the start= value, or the full URL if absent."""
     m = re.search(r"[?&]start=([^&\s]+)", url)
     return m.group(1) if m else url
 
 
-# ── Single-button extractor ───────────────────────────────────
-def extract_file_entry(text: str, reply_markup) -> dict | None:
+# ── Parse the initial (text-only) channel_post ───────────────
+def parse_initial_message(text: str) -> dict | None:
     """
-    Each log message has ONE inline button:
-      label = filename  e.g. "Granny (2026) Tamil TRUE WEB-DL 1080p.mkv"
-      url   = https://Askmovies.lcubots.news/?start=fs_MjI2NzA=
-              OR https://t.me/FilestoreBot?start=FILE_ID
-
-    Accepts ANY https URL in the button — no domain restriction.
-    Returns {display_name, quality, link, file_id} or None.
+    Called on channel_post (no button yet).
+    Extracts title, year, quality_label, languages, is_series, filename.
     """
-    # ── Primary: inline keyboard button (any URL) ─────────────
-    if reply_markup and hasattr(reply_markup, "inline_keyboard"):
-        for row in reply_markup.inline_keyboard:
-            for btn in row:
-                url   = getattr(btn, "url", None)
-                label = (btn.text or "").strip()
-                if url and url.startswith("http") and label:
-                    entry = {
-                        "display_name": label,
-                        "quality":      quality_from_text(label),
-                        "link":         url,
-                        "file_id":      file_id_from_url(url),
-                    }
-                    log.info("Button → %s | %s", label, url)
-                    return entry   # one button per message
-
-    # ── Fallback: any https link in message text ───────────────
-    m = re.search(r"(https://\S+)", text)
-    if m:
-        url   = m.group(1)
-        first = text.splitlines()[0].strip()
-        label = first if re.search(r"\.(mkv|mp4|avi|mov)\b", first, re.IGNORECASE) else url
-        log.info("Text fallback → %s | %s", label, url)
-        return {
-            "display_name": label,
-            "quality":      quality_from_text(label),
-            "link":         url,
-            "file_id":      file_id_from_url(url),
-        }
-
-    log.warning("No button URL found in message — skipping")
-    return None
-
-
-# ── Parser ────────────────────────────────────────────────────
-def parse_log_message(text: str, reply_markup=None) -> dict | None:
     if not text or not text.strip():
         return None
 
@@ -187,12 +156,21 @@ def parse_log_message(text: str, reply_markup=None) -> dict | None:
     title, year = extract_title_year(first_line)
 
     if not title or len(title) < 2:
-        log.debug("Skipping — title too short from %r", lines[0])
+        log.debug("Skipping — bad title from %r", lines[0])
         return None
 
-    # Quality label (source type)
     m = SOURCE_RE.search(first_line)
     quality_label = m.group(1).upper() if m else "WEB-DL"
+
+    # Resolution from explicit "Quality :" line, else filename
+    quality = ""
+    for line in lines:
+        qm = re.search(r"Quality\s*:\s*#?(\S+)", line, re.IGNORECASE)
+        if qm:
+            quality = qm.group(1).lstrip("#")
+            break
+    if not quality:
+        quality = quality_from_text(first_line)
 
     # Languages
     languages: list[str] = []
@@ -205,21 +183,55 @@ def parse_log_message(text: str, reply_markup=None) -> dict | None:
         fn_lower = first_line.lower()
         languages = [name for abbr, name in LANG_MAP.items() if abbr in fn_lower]
 
-    # Series detection
     is_series = bool(re.search(r"\bS\d{1,2}\s*E?P?\d+\b", first_line, re.IGNORECASE))
-
-    # Single file entry from the one button
-    file_entry = extract_file_entry(text, reply_markup)
 
     return {
         "title":         title,
         "year":          year,
         "filename":      first_line,
+        "quality":       quality,
         "quality_label": quality_label,
         "languages":     languages,
         "is_series":     is_series,
-        "file_entry":    file_entry,   # may be None if no button found
     }
+
+
+# ── Read button URL from edited_channel_post ─────────────────
+def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
+    """
+    Called on edited_channel_post (button now present).
+    Returns {display_name, quality, link, file_id}.
+    """
+    # Primary: inline keyboard button — accept any https URL
+    if reply_markup and hasattr(reply_markup, "inline_keyboard"):
+        for row in reply_markup.inline_keyboard:
+            for btn in row:
+                url   = getattr(btn, "url", None)
+                label = (btn.text or "").strip()
+                if url and url.startswith("http") and label:
+                    log.info("Button → label=%r url=%s", label, url)
+                    return {
+                        "display_name": label,
+                        "quality":      quality_from_text(label) or meta.get("quality", "HD"),
+                        "link":         url,
+                        "file_id":      file_id_from_url(url),
+                    }
+
+    # Fallback: any https link in text
+    m = re.search(r"(https://\S+)", text)
+    if m:
+        url   = m.group(1)
+        label = meta.get("filename") or url
+        log.info("Text fallback → label=%r url=%s", label, url)
+        return {
+            "display_name": label,
+            "quality":      meta.get("quality", "HD"),
+            "link":         url,
+            "file_id":      file_id_from_url(url),
+        }
+
+    log.warning("No button URL on edited message — cannot get file link")
+    return None
 
 
 # ── Caption builder ───────────────────────────────────────────
@@ -239,15 +251,17 @@ def build_caption(data: dict) -> str:
         key=lambda f: QUALITY_ORDER.get(f.get("quality", ""), 99),
     )
 
-    # One clickable line per quality — button URL goes directly to filestore bot
+    # One 🔥 hyperlink line per quality variant
     file_lines = ""
     for f in files_sorted:
         label = f.get("display_name") or f.get("quality", "HD")
         link  = f["link"]
         file_lines += f'\n🔥 <a href="{link}">{label}</a>'
 
-    # Batch link = highest quality file's link
-    batch_link = files_sorted[-1]["link"] if files_sorted else f"https://t.me/{FILESTORE_BOT}"
+    batch_link = (
+        files_sorted[-1]["link"] if files_sorted
+        else f"https://t.me/{FILESTORE_BOT}"
+    )
 
     season_line = ""
     if is_series:
@@ -270,51 +284,73 @@ def build_caption(data: dict) -> str:
     )
 
 
-# ── Deduplication ─────────────────────────────────────────────
 def already_stored(files: list[dict], file_id: str) -> bool:
-    """Deduplicate by file_id (the start= parameter), not full URL."""
     return any(f.get("file_id") == file_id for f in files)
 
 
-# ── Handler ───────────────────────────────────────────────────
-async def handle_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg: Message | None = update.channel_post or update.message
-    if not msg:
-        return
-    if str(msg.chat.id) != LOG_CHANNEL_ID:
+def movie_key_for(title: str, year) -> str:
+    return re.sub(r"\s+", "_", f"{title}_{year or ''}".lower())
+
+
+# ── Handler: initial message (text only, no button) ──────────
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg: Message | None = update.channel_post
+    if not msg or str(msg.chat.id) != LOG_CHANNEL_ID:
         return
 
-    text         = (msg.text or msg.caption or "").strip()
-    reply_markup = msg.reply_markup  # InlineKeyboardMarkup or None
-
+    text = (msg.text or msg.caption or "").strip()
     if not text:
         return
 
-    log.info("📥 (%d chars): %s", len(text), text[:160])
+    log.info("📥 new msg_id=%d: %s", msg.message_id, text[:120])
 
-    parsed = parse_log_message(text, reply_markup)
+    parsed = parse_initial_message(text)
     if not parsed:
         return
 
-    title      = parsed["title"]
-    year       = parsed.get("year")
-    movie_key  = re.sub(r"\s+", "_", f"{title}_{year or ''}".lower())
-    file_entry = parsed.get("file_entry")   # single {display_name, quality, link, file_id}
+    async with state_lock:
+        pending[msg.message_id] = parsed
+        log.info("⏳ Pending msg_id=%d → %r (%s)", msg.message_id, parsed["title"], parsed["year"])
 
-    async with posted_lock:
 
-        if movie_key in posted:
-            # ── Movie already posted → add new quality if not duplicate ──
-            data = posted[movie_key]
+# ── Handler: edited message (button now attached) ─────────────
+async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg: Message | None = update.edited_channel_post
+    if not msg or str(msg.chat.id) != LOG_CHANNEL_ID:
+        return
 
-            if file_entry:
-                if already_stored(data["files"], file_entry["file_id"]):
-                    log.info("⏭ Duplicate file_id for %r — skipping", title)
-                    return
-                data["files"].append(file_entry)
-            else:
-                log.info("⏭ No file entry in message for %r — skipping edit", title)
+    text         = (msg.text or msg.caption or "").strip()
+    reply_markup = msg.reply_markup
+
+    log.info("✏️ edited msg_id=%d buttons=%s", msg.message_id,
+             bool(reply_markup and getattr(reply_markup, "inline_keyboard", None)))
+
+    async with state_lock:
+        meta = pending.pop(msg.message_id, None)
+
+    if not meta:
+        # Edit arrived without a prior channel_post in memory — parse text now
+        log.info("No pending entry for msg_id=%d — parsing text", msg.message_id)
+        meta = parse_initial_message(text)
+        if not meta:
+            return
+
+    file_entry = extract_button_entry(text, reply_markup, meta)
+    if not file_entry:
+        return
+
+    title     = meta["title"]
+    year      = meta.get("year")
+    mkey      = movie_key_for(title, year)
+
+    async with state_lock:
+        if mkey in posted:
+            # ── Add quality to existing public post ───────────
+            data = posted[mkey]
+            if already_stored(data["files"], file_entry["file_id"]):
+                log.info("⏭ Duplicate file_id for %r", title)
                 return
+            data["files"].append(file_entry)
 
             caption = build_caption(data)
             try:
@@ -324,22 +360,22 @@ async def handle_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     caption=caption,
                     parse_mode=ParseMode.HTML,
                 )
-                log.info("✏️  Edited %r — added %s", title, file_entry["quality"])
+                log.info("✏️  Public post edited for %r — added %s", title, file_entry["quality"])
             except Exception as exc:
-                log.error("Edit failed for %r (msg_id=%s): %s", title, data["message_id"], exc)
+                log.error("Edit failed for %r: %s", title, exc)
 
         else:
-            # ── New movie → fetch poster and post ─────────────────────
+            # ── Create new public post ────────────────────────
             poster_url = fetch_tmdb_poster(title, year)
 
             data = {
                 "title":         title,
                 "year":          year,
-                "languages":     parsed.get("languages", []),
-                "quality_label": parsed.get("quality_label", "WEB-DL"),
-                "is_series":     parsed.get("is_series", False),
-                "filename":      parsed.get("filename", ""),
-                "files":         [file_entry] if file_entry else [],
+                "languages":     meta.get("languages", []),
+                "quality_label": meta.get("quality_label", "WEB-DL"),
+                "is_series":     meta.get("is_series", False),
+                "filename":      meta.get("filename", ""),
+                "files":         [file_entry],
                 "poster_url":    poster_url,
                 "message_id":    None,
             }
@@ -362,13 +398,9 @@ async def handle_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     )
 
                 data["message_id"] = sent.message_id
-                posted[movie_key]  = data
-                log.info(
-                    "✅ Posted %r (%s) | quality=%s | msg_id=%s",
-                    title, year,
-                    file_entry["quality"] if file_entry else "—",
-                    sent.message_id,
-                )
+                posted[mkey]       = data
+                log.info("✅ Posted %r (%s) | %s | msg_id=%s",
+                         title, year, file_entry["quality"], sent.message_id)
             except Exception as exc:
                 log.error("Post failed for %r: %s", title, exc)
 
@@ -382,11 +414,14 @@ if __name__ == "__main__":
     log.info("🤖 AskMovies Poster Bot starting (webhook) on port %d", port)
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.ALL, handle_log_message))
+
+    # Two separate handlers — one for new posts, one for edits
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL & ~filters.UpdateType.EDITED, handle_channel_post))
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.UpdateType.EDITED, handle_edited_post))
+
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-                            )
-                      
+)

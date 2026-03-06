@@ -129,8 +129,11 @@ def parse_log_message(text: str) -> dict | None:
         # Try to extract before quality markers
         title_raw = re.split(r'\b(WEB-DL|HDRip|BluRay|WEBRip|HDCAM|480p|720p|1080p|4K)\b', filename, flags=re.IGNORECASE)[0]
 
-    # Clean title
+    # Clean title - remove emoji blocks, [ASK] style prefixes, underscores
     title = re.sub(r'[_\-]+', ' ', title_raw).strip()
+    title = re.sub(r'[\U0001F300-\U0001FFFF\U00002700-\U000027BF\u2400-\u2BEF]+', '', title).strip()
+    title = re.sub(r'[🄰-🅿]+', '', title).strip()  # enclosed letters
+    title = re.sub(r'\[.*?\]', '', title).strip()   # [ASK] etc
     title = re.sub(r'\s+', ' ', title).strip()
 
     # Remove season/episode info from title for grouping
@@ -367,4 +370,5 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook_url
-      )
+          )
+  

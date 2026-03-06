@@ -130,12 +130,11 @@ def parse_log_message(text: str) -> dict:
     # Series detection
     result["is_series"] = bool(re.search(r'S\d{1,2}\s*EP?\d+', filename, re.IGNORECASE))
 
-    # Extract file ID from workers.dev URL
-    workers_match = re.search(r'/watch/(\d+)\?', text)
+    # Extract workers.dev link directly as download link
+    workers_match = re.search(r'(https://www\.askmovies\.workers\.dev/[^\s]+)', text)
     if workers_match:
-        result["file_id"] = workers_match.group(1)
-        result["link"] = make_filestore_link(workers_match.group(1))
-        log.info(f"🔗 File ID {workers_match.group(1)} → {result['link']}")
+        result["link"] = workers_match.group(1)
+        log.info(f"🔗 Link extracted: {result['link']}")
 
     return result
 
@@ -155,9 +154,10 @@ def build_caption(data: dict) -> str:
 
     file_lines = ""
     for f in files_sorted:
-        q    = f.get("quality", "HD")
-        link = f.get("link", f"https://t.me/{FILESTORE_BOT}")
-        file_lines += f'\n♨️ <a href="{link}">{title} ({year}) - {q}</a>'
+        q        = f.get("quality", "HD")
+        link     = f.get("link", f"https://t.me/{FILESTORE_BOT}")
+        filename = f.get("filename", f"{title} ({year})")
+        file_lines += f'\n♨️ <a href="{link}">{filename} - {q}</a>'
 
     batch_link = files_sorted[-1].get("link", f"https://t.me/{FILESTORE_BOT}") if files_sorted else f"https://t.me/{FILESTORE_BOT}"
 
@@ -204,8 +204,9 @@ async def handle_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if parsed.get("link"):
         file_entry = {
-            "quality": parsed["quality"],
-            "link":    parsed["link"]
+            "quality":  parsed["quality"],
+            "link":     parsed["link"],
+            "filename": parsed.get("filename", title)
         }
 
     async with posted_lock:
@@ -279,4 +280,4 @@ if __name__ == "__main__":
         url_path=webhook_path,
         webhook_url=full_webhook_url
   )
-  
+      

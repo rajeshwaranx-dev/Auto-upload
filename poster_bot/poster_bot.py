@@ -132,9 +132,9 @@ def extract_title_year(filename: str) -> tuple[str, int | None]:
 
 
 def quality_from_text(text: str) -> str:
-    m = QUALITY_RE.search(text)
+    clean = text.replace("\xa0", " ")
+    m = QUALITY_RE.search(clean)
     return m.group(1) if m else "HD"
-
 
 def file_id_from_url(url: str) -> str:
     """Stable dedup key — the start= value, or the full URL if absent."""
@@ -377,12 +377,21 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             caption = build_caption(data)
             try:
-                await context.bot.edit_message_caption(
-                    chat_id=PUBLIC_CHANNEL_ID,
-                    message_id=data["message_id"],
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                )
+                if data.get("has_photo"):
+                    await context.bot.edit_message_caption(
+                        chat_id=PUBLIC_CHANNEL_ID,
+                        message_id=data["message_id"],
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                    )
+                else:
+                    await context.bot.edit_message_text(
+                        chat_id=PUBLIC_CHANNEL_ID,
+                        message_id=data["message_id"],
+                        text=caption,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
                 log.info("✏️  Public post edited for %r — added %s", title, file_entry["quality"])
             except Exception as exc:
                 log.error("Edit failed for %r: %s", title, exc)
@@ -421,6 +430,7 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     )
 
                 data["message_id"] = sent.message_id
+                data["has_photo"]  = bool(poster_url)
                 posted[mkey]       = data
                 log.info("✅ Posted %r (%s) | %s | msg_id=%s",
                          title, year, file_entry["quality"], sent.message_id)
@@ -448,4 +458,3 @@ if __name__ == "__main__":
         url_path=webhook_path,
         webhook_url=full_webhook,
 )
-  

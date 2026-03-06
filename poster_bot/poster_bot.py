@@ -259,6 +259,68 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
     return None
 
 
+# ── Episode extractor ────────────────────────────────────────
+EP_RE = re.compile(r"\bEP?\s*(\d{1,3})\b", re.IGNORECASE)
+
+def ep_num(f: dict) -> int | None:
+    """Return episode number from display_name, or None."""
+    m = EP_RE.search(f.get("display_name") or "")
+    return int(m.group(1)) if m else None
+
+
+def build_series_file_lines(files: list[dict]) -> tuple[str, str]:
+    """
+    Group files by episode, show qualities as pipe-separated links per episode.
+    Returns (file_lines_html, batch_qualities_html).
+
+    Example line:  🌊 EP01 : <a href="...">480P</a> | <a href="...">720P</a> | <a href="...">1080P</a>
+    """
+    # Group: ep_num → list of (quality, link)
+    from collections import defaultdict
+    episodes: dict = defaultdict(list)
+    no_ep = []
+
+    for f in files:
+        eq = ep_num(f)
+        quality = f.get("quality", "HD")
+        link    = f["link"]
+        if eq is not None:
+            episodes[eq].append((quality, link))
+        else:
+            no_ep.append(f)
+
+    parts = []
+
+    # Episode grouped lines
+    for ep in sorted(episodes.keys()):
+        quals = sorted(
+            episodes[ep],
+            key=lambda x: QUALITY_ORDER.get(x[0], 99),
+        )
+        qual_links = " | ".join(f'<a href="{lnk}">{q}</a>' for q, lnk in quals)
+        parts.append(f"🌊 <b>EP{ep:02d}</b> : {qual_links}")
+
+    # Files without episode number (movies mixed in)
+    for f in no_ep:
+        label = f.get("display_name") or f.get("quality", "HD")
+        parts.append(f'🔥 <a href="{f['link']}">{label}</a>')
+
+    file_lines = "\n\n".join(parts)
+    if file_lines:
+        file_lines = "\n" + file_lines
+
+    # Batch line: all unique qualities as links to highest-quality file each
+    best: dict = {}
+    for f in files:
+        q = f.get("quality", "HD")
+        if q not in best or QUALITY_ORDER.get(q, 99) > QUALITY_ORDER.get(best[q].get("quality",""), 99):
+            best[q] = f
+    batch_parts = sorted(best.values(), key=lambda f: QUALITY_ORDER.get(f.get("quality",""), 99))
+    batch_str = " | ".join(f'<a href="{f['link']}">{f.get("quality","HD")}</a>' for f in batch_parts)
+
+    return file_lines, batch_str
+
+
 # ── Caption builder ───────────────────────────────────────────
 def build_caption(data: dict) -> str:
     title         = data["title"]
@@ -276,16 +338,6 @@ def build_caption(data: dict) -> str:
         key=lambda f: QUALITY_ORDER.get(f.get("quality", ""), 99),
     )
 
-    # One 🔥 hyperlink line per quality variant, blank line between each
-    file_parts = []
-    for f in files_sorted:
-        label = f.get("display_name") or f.get("quality", "HD")
-        link  = f["link"]
-        file_parts.append(f'🔥 <a href="{link}">{label}</a>')
-    file_lines = "\n\n".join(file_parts)
-    if file_lines:
-        file_lines = "\n" + file_lines
-
     batch_link = (
         files_sorted[-1]["link"] if files_sorted
         else f"https://t.me/{FILESTORE_BOT}"
@@ -297,6 +349,21 @@ def build_caption(data: dict) -> str:
         if sm:
             season_line = f"\n💫 <b>Season:</b> {int(sm.group(1))}"
 
+    if is_series and any(ep_num(f) is not None for f in files):
+        # ── Series format: EP01 : 480P | 720P | 1080P ─────────
+        file_lines, batch_str = build_series_file_lines(files)
+        batch_section = f'📦 <b>Get all files for:</b> {batch_str}'
+    else:
+        # ── Movie format: one 🔥 line per file ─────────────────
+        file_parts = []
+        for f in files_sorted:
+            label = f.get("display_name") or f.get("quality", "HD")
+            file_parts.append(f'🔥 <a href="{f['link']}">{label}</a>')
+        file_lines = "\n\n".join(file_parts)
+        if file_lines:
+            file_lines = "\n" + file_lines
+        batch_section = f'📦 <b>Get all files in one link:</b> <a href="{batch_link}">Click Here</a>'
+
     return (
         "<b>AskMovies</b>\n"
         f"🎬 <b>Title:</b> {title}\n"
@@ -306,7 +373,7 @@ def build_caption(data: dict) -> str:
         f"🎧 <b>Audio:</b> {audio_str}\n\n"
         "🔺<b>Telegram File</b>🔻"
         f"{file_lines}\n\n"
-        f'📦 <b>Get all files in one link:</b> <a href="{batch_link}">Click Here</a>\n\n'
+        f"{batch_section}\n\n"
         "Note 💢: If the link is not working, copy it and paste it into your browser.\n\n"
         f"❤️Join » @{FILESTORE_BOT}"
     )
@@ -464,4 +531,4 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-)
+          )

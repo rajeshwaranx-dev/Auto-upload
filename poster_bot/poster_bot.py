@@ -1,249 +1,173 @@
 """
 AskMovies Poster Bot
 ====================
-Monitors log channel → groups files by movie title → fetches poster from TMDB
-→ posts formatted caption with lcubots/filestore links to public channel.
+Monitors log channel → posts immediately to public channel
+→ edits post when more qualities arrive for same movie.
 
-Environment Variables (set in Koyeb):
-  BOT_TOKEN           = Telegram bot token from @BotFather
-  TMDB_API_KEY        = TMDB API key from themoviedb.org
-  LOG_CHANNEL_ID      = Channel ID where leech bot posts logs (e.g. -1001234567890)
-  PUBLIC_CHANNEL_ID   = Destination public channel ID
-  FILESTORE_BOT       = File store bot username (e.g. AskMoviesBot)
-  WEBHOOK_URL         = Your Koyeb app URL (e.g. https://your-app.koyeb.app)
-  GROUP_WAIT_MINUTES  = Minutes to wait before posting (default: 30)
+Environment Variables:
+  BOT_TOKEN          = Telegram bot token
+  TMDB_API_KEY       = TMDB API key
+  LOG_CHANNEL_ID     = Log channel ID
+  PUBLIC_CHANNEL_ID  = Public destination channel ID
+  FILESTORE_BOT      = File store bot username (without @)
+  WEBHOOK_URL        = Koyeb app URL
 """
 
 import os, re, base64, logging, asyncio, json
-from datetime import datetime, timezone, timedelta
-from collections import defaultdict
+from datetime import datetime, timezone
 import requests
-from telegram import Bot, InputMediaPhoto
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-from telegram import Update
+from telegram.constants import ParseMode
 
-# ── Config ────────────────────────────────────────────────────
-BOT_TOKEN          = os.environ["BOT_TOKEN"]
-TMDB_API_KEY       = os.environ["TMDB_API_KEY"]
-LOG_CHANNEL_ID     = os.environ["LOG_CHANNEL_ID"]
-PUBLIC_CHANNEL_ID  = os.environ["PUBLIC_CHANNEL_ID"]
-FILESTORE_BOT      = os.environ["FILESTORE_BOT"].lstrip("@")
-WEBHOOK_URL        = os.environ["WEBHOOK_URL"]
-GROUP_WAIT_MINUTES = int(os.environ.get("GROUP_WAIT_MINUTES", "30"))
+BOT_TOKEN         = os.environ["BOT_TOKEN"]
+TMDB_API_KEY      = os.environ["TMDB_API_KEY"]
+LOG_CHANNEL_ID    = str(os.environ["LOG_CHANNEL_ID"])
+PUBLIC_CHANNEL_ID = str(os.environ["PUBLIC_CHANNEL_ID"])
+FILESTORE_BOT     = os.environ["FILESTORE_BOT"].lstrip("@")
+WEBHOOK_URL       = os.environ["WEBHOOK_URL"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── In-memory store for pending movie groups ──────────────────
-# Key: normalized movie title
-# Value: {title, year, quality_set, languages, files: [{quality, file_id, link}], timer_task, poster_url}
-pending = {}
-pending_lock = asyncio.Lock()
+# posted[movie_key] = {title, year, languages, quality_label, is_series,
+#                      files:[{quality, link}], message_id, poster_url}
+posted = {}
+posted_lock = asyncio.Lock()
 
-# ── TMDB Poster Fetch ─────────────────────────────────────────
-def fetch_tmdb_poster(title: str, year: int = None) -> str:
-    """Search TMDB for movie/series poster. Returns image URL or None."""
+# ── TMDB ─────────────────────────────────────────────────────
+def fetch_tmdb_poster(title: str, year=None) -> str:
     try:
         params = {"api_key": TMDB_API_KEY, "query": title, "language": "en-US"}
         if year:
             params["year"] = year
-
-        # Try movie first
-        r = requests.get("https://api.themoviedb.org/3/search/movie", params=params, timeout=10)
-        data = r.json()
-        results = data.get("results", [])
-
-        # Try TV series if no movie found
-        if not results:
-            r = requests.get("https://api.themoviedb.org/3/search/tv", params=params, timeout=10)
-            data = r.json()
-            results = data.get("results", [])
-
-        if results:
-            poster_path = results[0].get("poster_path")
-            if poster_path:
-                return f"https://image.tmdb.org/t/p/w500{poster_path}"
+        for endpoint in ["movie", "tv"]:
+            r = requests.get(f"https://api.themoviedb.org/3/search/{endpoint}", params=params, timeout=10)
+            results = r.json().get("results", [])
+            if results and results[0].get("poster_path"):
+                return f"https://image.tmdb.org/t/p/w500{results[0]['poster_path']}"
     except Exception as e:
-        log.error(f"TMDB fetch failed: {e}")
+        log.error(f"TMDB error: {e}")
     return None
 
-# ── Build lcubots/filestore link from file ID ─────────────────
+# ── FileStore link ────────────────────────────────────────────
 def make_filestore_link(file_id: str) -> str:
-    """Convert numeric file ID to filestore bot link."""
-    try:
-        encoded = base64.b64encode(file_id.encode()).decode()
-        return f"https://t.me/{FILESTORE_BOT}?start=fs_{encoded}"
-    except:
-        return f"https://t.me/{FILESTORE_BOT}"
+    encoded = base64.b64encode(file_id.encode()).decode()
+    return f"https://t.me/{FILESTORE_BOT}?start=fs_{encoded}"
 
-# ── Parse log channel message ─────────────────────────────────
-def parse_log_message(text: str) -> dict | None:
-    """
-    Parse log messages like:
-      [ASK] Aranmanai 3 (2021) Tamil WEB-DL 1080p.mkv
-      Language: Tamil, Telugu
-      Quality: #480p
-      (file ID on separate message: 22618)
-
-    Also handles just a plain file ID number.
-    """
+# ── Parse log message ─────────────────────────────────────────
+def parse_log_message(text: str) -> dict:
     if not text:
         return None
 
+    lines = text.strip().splitlines()
     result = {}
 
-    # Check if message is JUST a file ID (number only)
-    if re.match(r'^\d+$', text.strip()):
-        result["file_id"] = text.strip()
-        return result
+    # Get filename from first line - strip [ASK] emoji prefixes
+    first_line = lines[0]
+    first_line = re.sub(r'\[.*?\]', '', first_line).strip()
+    first_line = re.sub(r'[^\x00-\x7F\u0080-\u024F\s\(\)\[\]\-\_\.]+', '', first_line).strip()
+    filename = first_line
 
-    lines = text.strip().splitlines()
+    # Extract year
+    year_match = re.search(r'\((\d{4})\)|\b(20\d{2})\b', filename)
+    year = int(year_match.group(1) or year_match.group(2)) if year_match else None
 
-    # Extract filename from first line
-    filename = ""
-    for line in lines:
-        # Remove [ASK] prefix
-        clean = re.sub(r'\[.*?\]', '', line).strip()
-        if clean and ('.mkv' in clean.lower() or '.mp4' in clean.lower() or '.avi' in clean.lower()):
-            filename = clean
-            break
-        elif clean and not any(k in clean.lower() for k in ['language', 'quality', 'fast', 'join', 'search', 'http']):
-            if len(clean) > 10:
-                filename = clean
-
-    if not filename and lines:
-        filename = re.sub(r'\[.*?\]', '', lines[0]).strip()
-
-    # Extract title and year from filename
-    # Pattern: Title (Year) or Title Year
-    year_match = re.search(r'\((\d{4})\)', filename)
-    if not year_match:
-        year_match = re.search(r'\b(20\d{2})\b', filename)
-
-    year = int(year_match.group(1)) if year_match else None
-
-    # Extract title (everything before year)
+    # Extract title
     if year_match:
         title_raw = filename[:year_match.start()].strip()
     else:
-        # Try to extract before quality markers
-        title_raw = re.split(r'\b(WEB-DL|HDRip|BluRay|WEBRip|HDCAM|480p|720p|1080p|4K)\b', filename, flags=re.IGNORECASE)[0]
+        title_raw = re.split(r'\b(WEB-DL|HDRip|BluRay|WEBRip|HDCAM|480p|720p|1080p|4K|HQ)\b', filename, flags=re.IGNORECASE)[0]
 
-    # Clean title - remove emoji blocks, [ASK] style prefixes, underscores
+    # Clean title
     title = re.sub(r'[_\-]+', ' ', title_raw).strip()
-    title = re.sub(r'[\U0001F300-\U0001FFFF\U00002700-\U000027BF\u2400-\u2BEF]+', '', title).strip()
-    title = re.sub(r'[🄰-🅿]+', '', title).strip()  # enclosed letters
-    title = re.sub(r'\[.*?\]', '', title).strip()   # [ASK] etc
+    title = re.sub(r'\s+', ' ', title).strip()
+    # Remove file extension
+    title = re.sub(r'\.(mkv|mp4|avi|mov)$', '', title, flags=re.IGNORECASE).strip()
+    # Remove S01E01 patterns
+    title = re.sub(r'\s*S\d{1,2}E?\d*\s*', ' ', title, flags=re.IGNORECASE).strip()
     title = re.sub(r'\s+', ' ', title).strip()
 
-    # Remove file extension from title
-    title = re.sub(r'\.mkv$|\.mp4$|\.avi$|\.mov$', '', title, flags=re.IGNORECASE).strip()
-    # Remove season/episode info from title for grouping
-    title_clean = re.sub(r'\s*S\d{1,2}(E\d+)?\s*(EP?\d+(-\d+)?)?\s*', ' ', title, flags=re.IGNORECASE).strip()
-    title_clean = re.sub(r'\s+', ' ', title_clean).strip()
-
-    if not title_clean:
+    if not title or len(title) < 2:
         return None
 
-    result["title"] = title_clean
+    result["title"] = title
     result["year"] = year
     result["filename"] = filename
 
-    # Extract quality from filename or Quality: line
+    # Quality from lines
     quality = ""
     for line in lines:
         qm = re.search(r'Quality\s*:\s*#?(\w+)', line, re.IGNORECASE)
         if qm:
             quality = qm.group(1).replace('#', '')
             break
-
     if not quality:
         qm = re.search(r'\b(480p|720p|1080p|4K|2160p|240p|360p)\b', filename, re.IGNORECASE)
         if qm:
             quality = qm.group(1)
-
     result["quality"] = quality or "HD"
 
-    # Extract languages from Language: line
+    # Quality label (WEB-DL, HDRip etc)
+    qlm = re.search(r'\b(WEB-DL|HDRip|BluRay|WEBRip|HDCAM|HQ HDRip|TRUE WEB-DL|HQ)\b', filename, re.IGNORECASE)
+    result["quality_label"] = qlm.group(1).upper() if qlm else "WEB-DL"
+
+    # Languages
     languages = []
     for line in lines:
         if re.search(r'lang', line, re.IGNORECASE):
             lang_part = re.sub(r'[Ll]ang[a-z]*\s*:', '', line).strip()
             languages = [l.strip() for l in re.split(r'[,+]', lang_part) if l.strip()]
             break
-
     if not languages:
-        # Try to detect from filename
-        lang_map = {
-            'tam': 'Tamil', 'tel': 'Telugu', 'hin': 'Hindi',
-            'eng': 'English', 'mal': 'Malayalam', 'kan': 'Kannada'
-        }
+        lang_map = {'tam': 'Tamil', 'tel': 'Telugu', 'hin': 'Hindi',
+                    'eng': 'English', 'mal': 'Malayalam', 'kan': 'Kannada'}
         for abbr, lang in lang_map.items():
             if abbr in filename.lower():
                 languages.append(lang)
-
     result["languages"] = languages
 
-    # Detect if series
-    is_series = bool(re.search(r'S\d{1,2}\s*EP?\d+', filename, re.IGNORECASE))
-    result["is_series"] = is_series
+    # Series detection
+    result["is_series"] = bool(re.search(r'S\d{1,2}\s*EP?\d+', filename, re.IGNORECASE))
 
-    # Extract quality override (WEB-DL, HDRip, etc.)
-    quality_label_match = re.search(r'\b(WEB-DL|HDRip|BluRay|WEBRip|HDCAM|HQ HDRip|TRUE WEB-DL)\b', filename, re.IGNORECASE)
-    if quality_label_match:
-        result["quality_label"] = quality_label_match.group(1).upper()
-    else:
-        result["quality_label"] = "WEB-DL"
+    # Extract file ID from workers.dev URL
+    workers_match = re.search(r'/watch/(\d+)\?', text)
+    if workers_match:
+        result["file_id"] = workers_match.group(1)
+        result["link"] = make_filestore_link(workers_match.group(1))
+        log.info(f"🔗 File ID {workers_match.group(1)} → {result['link']}")
 
     return result
 
-# ── Format and send public post ───────────────────────────────
-async def post_to_public_channel(bot: Bot, movie_key: str):
-    """Format and send the grouped movie post to public channel."""
-    async with pending_lock:
-        if movie_key not in pending:
-            return
-        data = pending.pop(movie_key)
-
-    title     = data["title"]
-    year      = data.get("year", "")
-    languages = data.get("languages", [])
-    files     = data.get("files", [])
-    is_series = data.get("is_series", False)
+# ── Build caption ─────────────────────────────────────────────
+def build_caption(data: dict) -> str:
+    title         = data["title"]
+    year          = data.get("year", "")
+    languages     = data.get("languages", [])
+    files         = data.get("files", [])
+    is_series     = data.get("is_series", False)
     quality_label = data.get("quality_label", "WEB-DL")
-    poster_url = data.get("poster_url")
 
-    if not files:
-        # No file ID received - post with just quality info, no download link
-        log.warning(f"⚠️ No file links for {title} - posting without download link")
-        quality = data.get("quality", "HD")
-        files = [{"quality": quality, "file_id": "", "link": f"https://t.me/{FILESTORE_BOT}"}]
-
-    # Build audio string
     audio_str = " + ".join(languages) if languages else "Tamil"
 
-    # Sort files by quality
-    quality_order = {"240p": 1, "360p": 2, "480p": 3, "720p": 4, "1080p": 5, "4K": 6, "2160p": 7}
-    files_sorted = sorted(files, key=lambda x: quality_order.get(x.get("quality", ""), 99))
+    quality_order = {"240p":1,"360p":2,"480p":3,"720p":4,"1080p":5,"4K":6,"2160p":7}
+    files_sorted = sorted(files, key=lambda x: quality_order.get(x.get("quality",""), 99))
 
-    # Build file lines with hyperlinks
     file_lines = ""
     for f in files_sorted:
-        q = f.get("quality", "HD")
-        link = f.get("link", "")
+        q    = f.get("quality", "HD")
+        link = f.get("link", f"https://t.me/{FILESTORE_BOT}")
         file_lines += f'\n♨️ <a href="{link}">{title} ({year}) - {q}</a>'
 
-    # Build batch link line (use highest quality or last file)
-    batch_link = files_sorted[-1].get("link", "") if files_sorted else ""
+    batch_link = files_sorted[-1].get("link", f"https://t.me/{FILESTORE_BOT}") if files_sorted else f"https://t.me/{FILESTORE_BOT}"
 
-    # Build caption
     season_line = ""
     if is_series:
-        season_match = re.search(r'(S\d{1,2})', data.get("filename", ""), re.IGNORECASE)
-        if season_match:
-            season_line = f"\n💫 Season: {int(season_match.group(1)[1:])}"
+        sm = re.search(r'S(\d{1,2})', data.get("filename", ""), re.IGNORECASE)
+        if sm:
+            season_line = f"\n💫 <b>Season:</b> {int(sm.group(1))}"
 
-    caption = (
+    return (
         f"<b>AskMovies</b>\n"
         f"🎬 <b>Title:</b> {title}\n"
         f"📅 <b>Year :</b> {year}"
@@ -252,139 +176,96 @@ async def post_to_public_channel(bot: Bot, movie_key: str):
         f"🎧 <b>Audio:</b> {audio_str}\n\n"
         f"🔺<b>Telegram File</b>🔻"
         f"{file_lines}\n\n"
-        f'📦<b>Get all files in one link:</b> <a href="{batch_link}">Click Here</a>\n\n'
+        f'📦 <b>Get all files in one link:</b> <a href="{batch_link}">Click Here</a>\n\n'
         f"Note 💢: If the link is not working, copy it and paste it into your browser.\n\n"
-        f"❤️Join » @{FILESTORE_BOT}\n"
+        f"❤️Join » @{FILESTORE_BOT}"
     )
 
-    try:
-        if poster_url:
-            await bot.send_photo(
-                chat_id=PUBLIC_CHANNEL_ID,
-                photo=poster_url,
-                caption=caption,
-                parse_mode="HTML"
-            )
-        else:
-            await bot.send_message(
-                chat_id=PUBLIC_CHANNEL_ID,
-                text=caption,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-        log.info(f"✅ Posted: {title} ({year}) with {len(files)} quality(ies)")
-    except Exception as e:
-        log.error(f"❌ Failed to post {title}: {e}")
-
-# ── Schedule post after wait time ─────────────────────────────
-async def schedule_post(bot: Bot, movie_key: str):
-    """Wait GROUP_WAIT_MINUTES then post."""
-    await asyncio.sleep(GROUP_WAIT_MINUTES * 60)
-    log.info(f"⏰ Timer expired for: {movie_key} — posting now")
-    await post_to_public_channel(bot, movie_key)
-
-# ── Handle log channel messages ───────────────────────────────
-# Store last parsed movie for file ID association
-last_parsed = {}
-
+# ── Handler ───────────────────────────────────────────────────
 async def handle_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.channel_post or update.message
-    if not msg:
-        return
-
-    if str(msg.chat.id) != str(LOG_CHANNEL_ID):
+    if not msg or str(msg.chat.id) != LOG_CHANNEL_ID:
         return
 
     text = msg.text or msg.caption or ""
     if not text.strip():
         return
 
-    log.info(f"📥 Log message: {text[:200]}")
+    log.info(f"📥 {text[:150]}")
 
     parsed = parse_log_message(text)
     if not parsed:
         return
 
-    # Case 1: Message is just a file ID number
-    if "file_id" in parsed and len(parsed) == 1:
-        file_id = parsed["file_id"]
-        # Associate with last pending movie for this channel
-        if last_parsed.get("chat_id") == str(msg.chat.id):
-            last_data = last_parsed.get("data", {})
-            title = last_data.get("title")
-            if title:
-                movie_key = f"{title}_{last_data.get('year', '')}".lower().replace(" ", "_")
-                link = make_filestore_link(file_id)
-                quality = last_data.get("quality", "HD")
+    title     = parsed["title"]
+    year      = parsed.get("year")
+    movie_key = f"{title}_{year}".lower().replace(" ", "_")
+    file_entry = None
 
-                async with pending_lock:
-                    if movie_key in pending:
-                        # Add file to existing group
-                        pending[movie_key]["files"].append({
-                            "quality": quality,
-                            "file_id": file_id,
-                            "link": link
-                        })
-                        # Reset timer
-                        if pending[movie_key].get("timer_task"):
-                            pending[movie_key]["timer_task"].cancel()
-                        task = asyncio.create_task(schedule_post(context.bot, movie_key))
-                        pending[movie_key]["timer_task"] = task
-                        log.info(f"📎 Added file ID {file_id} to {movie_key}")
-                    else:
-                        # Create new group
-                        poster_url = fetch_tmdb_poster(title, last_data.get("year"))
-                        task = asyncio.create_task(schedule_post(context.bot, movie_key))
-                        pending[movie_key] = {
-                            "title": title,
-                            "year": last_data.get("year"),
-                            "languages": last_data.get("languages", []),
-                            "quality_label": last_data.get("quality_label", "WEB-DL"),
-                            "is_series": last_data.get("is_series", False),
-                            "filename": last_data.get("filename", ""),
-                            "files": [{"quality": quality, "file_id": file_id, "link": link}],
-                            "poster_url": poster_url,
-                            "timer_task": task
-                        }
-                        log.info(f"🆕 New group: {movie_key} | Poster: {'✅' if poster_url else '❌'}")
-        return
+    if parsed.get("link"):
+        file_entry = {
+            "quality": parsed["quality"],
+            "link":    parsed["link"]
+        }
 
-    # Case 2: Full movie info message
-    title = parsed.get("title")
-    if not title:
-        return
-
-    # Store for file ID association
-    last_parsed["chat_id"] = str(msg.chat.id)
-    last_parsed["data"] = parsed
-
-    log.info(f"🎬 Parsed: {title} ({parsed.get('year')}) | {parsed.get('quality')} | {parsed.get('languages')}")
-
-    # Create group immediately — post even if no file ID arrives
-    movie_key = f"{title}_{parsed.get('year', '')}".lower().replace(" ", "_")
-    async with pending_lock:
-        if movie_key not in pending:
-            poster_url = fetch_tmdb_poster(title, parsed.get("year"))
-            task = asyncio.create_task(schedule_post(context.bot, movie_key))
-            pending[movie_key] = {
-                "title": title,
-                "year": parsed.get("year"),
-                "languages": parsed.get("languages", []),
-                "quality_label": parsed.get("quality_label", "WEB-DL"),
-                "quality": parsed.get("quality", "HD"),
-                "is_series": parsed.get("is_series", False),
-                "filename": parsed.get("filename", ""),
-                "files": [],  # will be filled when file ID arrives
-                "poster_url": poster_url,
-                "timer_task": task
-            }
-            log.info(f"🆕 New group created: {movie_key} | Poster: {'✅' if poster_url else '❌'}")
+    async with posted_lock:
+        if movie_key in posted:
+            # Movie already posted — edit existing message
+            if file_entry:
+                posted[movie_key]["files"].append(file_entry)
+            data = posted[movie_key]
+            caption = build_caption(data)
+            try:
+                await context.bot.edit_message_caption(
+                    chat_id=PUBLIC_CHANNEL_ID,
+                    message_id=data["message_id"],
+                    caption=caption,
+                    parse_mode=ParseMode.HTML
+                )
+                log.info(f"✏️ Edited post for: {title} — added {parsed['quality']}")
+            except Exception as e:
+                log.error(f"Edit failed: {e}")
         else:
-            log.info(f"📦 Group already exists: {movie_key}")
+            # New movie — post immediately
+            files = [file_entry] if file_entry else []
+            poster_url = fetch_tmdb_poster(title, year)
+
+            data = {
+                "title":         title,
+                "year":          year,
+                "languages":     parsed.get("languages", []),
+                "quality_label": parsed.get("quality_label", "WEB-DL"),
+                "is_series":     parsed.get("is_series", False),
+                "filename":      parsed.get("filename", ""),
+                "files":         files,
+                "poster_url":    poster_url,
+                "message_id":    None
+            }
+
+            caption = build_caption(data)
+            try:
+                if poster_url:
+                    sent = await context.bot.send_photo(
+                        chat_id=PUBLIC_CHANNEL_ID,
+                        photo=poster_url,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML
+                    )
+                else:
+                    sent = await context.bot.send_message(
+                        chat_id=PUBLIC_CHANNEL_ID,
+                        text=caption,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True
+                    )
+                data["message_id"] = sent.message_id
+                posted[movie_key] = data
+                log.info(f"✅ Posted: {title} ({year}) | msg_id={sent.message_id}")
+            except Exception as e:
+                log.error(f"❌ Post failed: {e}")
 
 # ── Main ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-
     port = int(os.environ.get("PORT", 8000))
     webhook_path = f"/webhook/{BOT_TOKEN}"
     full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}{webhook_path}"
@@ -398,4 +279,4 @@ if __name__ == "__main__":
         url_path=webhook_path,
         webhook_url=full_webhook_url
   )
-      
+  

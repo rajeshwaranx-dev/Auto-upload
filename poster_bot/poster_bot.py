@@ -136,8 +136,10 @@ def parse_log_message(text: str) -> dict | None:
     title = re.sub(r'\[.*?\]', '', title).strip()   # [ASK] etc
     title = re.sub(r'\s+', ' ', title).strip()
 
+    # Remove file extension from title
+    title = re.sub(r'\.mkv$|\.mp4$|\.avi$|\.mov$', '', title, flags=re.IGNORECASE).strip()
     # Remove season/episode info from title for grouping
-    title_clean = re.sub(r'\s*S\d{1,2}\s*(EP?\d+(-\d+)?)?\s*', ' ', title, flags=re.IGNORECASE).strip()
+    title_clean = re.sub(r'\s*S\d{1,2}(E\d+)?\s*(EP?\d+(-\d+)?)?\s*', ' ', title, flags=re.IGNORECASE).strip()
     title_clean = re.sub(r'\s+', ' ', title_clean).strip()
 
     if not title_clean:
@@ -395,5 +397,5 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook_url
-      )
-                          
+  )
+      

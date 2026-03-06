@@ -196,6 +196,24 @@ def parse_initial_message(text: str) -> dict | None:
     }
 
 
+# Generic button labels that carry no useful filename info
+GENERIC_LABELS = re.compile(
+    r"^(get\s+shar(e?able|ing)|download|click\s+here|open|get\s+file|watch|stream)\b",
+    re.IGNORECASE,
+)
+
+
+def resolve_display_name(btn_label: str, meta: dict) -> str:
+    """
+    Use the button label as display name ONLY if it looks like a real filename.
+    Otherwise fall back to the filename stored in meta (from the message text).
+    """
+    if not GENERIC_LABELS.match(btn_label):
+        return btn_label          # label is a proper filename — use it
+    # Generic label — build display name from meta filename
+    return meta.get("filename") or btn_label
+
+
 # ── Read button URL from edited_channel_post ─────────────────
 def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
     """
@@ -206,13 +224,15 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
     if reply_markup and hasattr(reply_markup, "inline_keyboard"):
         for row in reply_markup.inline_keyboard:
             for btn in row:
-                url   = getattr(btn, "url", None)
-                label = (btn.text or "").strip()
-                if url and url.startswith("http") and label:
-                    log.info("Button → label=%r url=%s", label, url)
+                url      = getattr(btn, "url", None)
+                btn_text = (btn.text or "").strip()
+                if url and url.startswith("http") and btn_text:
+                    display = resolve_display_name(btn_text, meta)
+                    quality = quality_from_text(display) or meta.get("quality", "HD")
+                    log.info("Button → display=%r quality=%s url=%s", display, quality, url)
                     return {
-                        "display_name": label,
-                        "quality":      quality_from_text(label) or meta.get("quality", "HD"),
+                        "display_name": display,
+                        "quality":      quality,
                         "link":         url,
                         "file_id":      file_id_from_url(url),
                     }
@@ -251,12 +271,15 @@ def build_caption(data: dict) -> str:
         key=lambda f: QUALITY_ORDER.get(f.get("quality", ""), 99),
     )
 
-    # One 🔥 hyperlink line per quality variant
-    file_lines = ""
+    # One 🔥 hyperlink line per quality variant, blank line between each
+    file_parts = []
     for f in files_sorted:
         label = f.get("display_name") or f.get("quality", "HD")
         link  = f["link"]
-        file_lines += f'\n🔥 <a href="{link}">{label}</a>'
+        file_parts.append(f'🔥 <a href="{link}">{label}</a>')
+    file_lines = "\n\n".join(file_parts)
+    if file_lines:
+        file_lines = "\n" + file_lines
 
     batch_link = (
         files_sorted[-1]["link"] if files_sorted
@@ -425,3 +448,4 @@ if __name__ == "__main__":
         url_path=webhook_path,
         webhook_url=full_webhook,
 )
+  

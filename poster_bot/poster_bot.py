@@ -212,7 +212,10 @@ async def post_to_public_channel(bot: Bot, movie_key: str):
     poster_url = data.get("poster_url")
 
     if not files:
-        return
+        # No file ID received - post with just quality info, no download link
+        log.warning(f"⚠️ No file links for {title} - posting without download link")
+        quality = data.get("quality", "HD")
+        files = [{"quality": quality, "file_id": "", "link": f"https://t.me/{FILESTORE_BOT}"}]
 
     # Build audio string
     audio_str = " + ".join(languages) if languages else "Tamil"
@@ -355,6 +358,28 @@ async def handle_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     log.info(f"🎬 Parsed: {title} ({parsed.get('year')}) | {parsed.get('quality')} | {parsed.get('languages')}")
 
+    # Create group immediately — post even if no file ID arrives
+    movie_key = f"{title}_{parsed.get('year', '')}".lower().replace(" ", "_")
+    async with pending_lock:
+        if movie_key not in pending:
+            poster_url = fetch_tmdb_poster(title, parsed.get("year"))
+            task = asyncio.create_task(schedule_post(context.bot, movie_key))
+            pending[movie_key] = {
+                "title": title,
+                "year": parsed.get("year"),
+                "languages": parsed.get("languages", []),
+                "quality_label": parsed.get("quality_label", "WEB-DL"),
+                "quality": parsed.get("quality", "HD"),
+                "is_series": parsed.get("is_series", False),
+                "filename": parsed.get("filename", ""),
+                "files": [],  # will be filled when file ID arrives
+                "poster_url": poster_url,
+                "timer_task": task
+            }
+            log.info(f"🆕 New group created: {movie_key} | Poster: {'✅' if poster_url else '❌'}")
+        else:
+            log.info(f"📦 Group already exists: {movie_key}")
+
 # ── Main ──────────────────────────────────────────────────────
 if __name__ == "__main__":
 
@@ -370,5 +395,5 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook_url
-          )
-  
+      )
+                          

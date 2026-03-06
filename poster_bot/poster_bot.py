@@ -233,7 +233,11 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
                 btn_text = (btn.text or "").strip()
                 if url and url.startswith("http") and btn_text:
                     display = resolve_display_name(btn_text, meta)
-                    quality = quality_from_text(display) or meta.get("quality", "HD")
+                    # Quality: try filename first, then fall back to the
+                    # explicitly parsed "Quality : 1080p" line from meta
+                    quality = quality_from_text(display)
+                    if not quality or quality == "HD":
+                        quality = meta.get("quality") or "HD"
                     log.info("Button → display=%r quality=%s url=%s", display, quality, url)
                     return {
                         "display_name": display,
@@ -533,5 +537,5 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-  )
-                  
+)
+  

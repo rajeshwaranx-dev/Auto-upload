@@ -21,8 +21,6 @@ import requests
 from telegram import Bot, InputMediaPhoto
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from telegram import Update
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
 
 # ── Config ────────────────────────────────────────────────────
 BOT_TOKEN          = os.environ["BOT_TOKEN"]
@@ -354,24 +352,8 @@ async def handle_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     log.info(f"🎬 Parsed: {title} ({parsed.get('year')}) | {parsed.get('quality')} | {parsed.get('languages')}")
 
-# ── Health check server ───────────────────────────────────────
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def log_message(self, format, *args):
-        pass
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    log.info(f"🌐 Health check on port {port}")
-    server.serve_forever()
-
 # ── Main ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    threading.Thread(target=run_health_server, daemon=True).start()
 
     port = int(os.environ.get("PORT", 8000))
     webhook_path = f"/webhook/{BOT_TOKEN}"
@@ -385,5 +367,4 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook_url
-  )
-      
+      )

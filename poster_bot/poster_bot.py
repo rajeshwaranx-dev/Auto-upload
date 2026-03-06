@@ -311,8 +311,10 @@ def already_stored(files: list[dict], file_id: str) -> bool:
     return any(f.get("file_id") == file_id for f in files)
 
 
-def movie_key_for(title: str, year) -> str:
-    return re.sub(r"\s+", "_", f"{title}_{year or ''}".lower())
+def movie_key_for(title: str, year, languages: list) -> str:
+    # Include primary language so Telugu/Hindi variants get separate posts
+    lang = languages[0].lower() if languages else "unknown"
+    return re.sub(r"\s+", "_", f"{title}_{year or ''}_{lang}".lower())
 
 
 # ── Handler: initial message (text only, no button) ──────────
@@ -364,7 +366,7 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     title     = meta["title"]
     year      = meta.get("year")
-    mkey      = movie_key_for(title, year)
+    mkey      = movie_key_for(title, year, meta.get("languages", []))
 
     async with state_lock:
         if mkey in posted:
@@ -457,4 +459,5 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-)
+                     )
+                     

@@ -303,7 +303,8 @@ def build_series_file_lines(files: list[dict]) -> tuple[str, str]:
     # Files without episode number (movies mixed in)
     for f in no_ep:
         label = f.get("display_name") or f.get("quality", "HD")
-        parts.append(f'🔥 <a href="{f['link']}">{label}</a>')
+        lnk = f['link']
+        parts.append(f'🔥 <a href="{lnk}">{label}</a>')
 
     file_lines = "\n\n".join(parts)
     if file_lines:
@@ -316,7 +317,7 @@ def build_series_file_lines(files: list[dict]) -> tuple[str, str]:
         if q not in best or QUALITY_ORDER.get(q, 99) > QUALITY_ORDER.get(best[q].get("quality",""), 99):
             best[q] = f
     batch_parts = sorted(best.values(), key=lambda f: QUALITY_ORDER.get(f.get("quality",""), 99))
-    batch_str = " | ".join(f'<a href="{f['link']}">{f.get("quality","HD")}</a>' for f in batch_parts)
+    batch_str = " | ".join('<a href="' + f['link'] + '">' + f.get("quality","HD") + '</a>' for f in batch_parts)
 
     return file_lines, batch_str
 
@@ -358,7 +359,8 @@ def build_caption(data: dict) -> str:
         file_parts = []
         for f in files_sorted:
             label = f.get("display_name") or f.get("quality", "HD")
-            file_parts.append(f'🔥 <a href="{f['link']}">{label}</a>')
+            lnk2 = f['link']
+            file_parts.append(f'🔥 <a href="{lnk2}">{label}</a>')
         file_lines = "\n\n".join(file_parts)
         if file_lines:
             file_lines = "\n" + file_lines
@@ -531,4 +533,5 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-          )
+  )
+                  

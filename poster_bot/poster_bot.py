@@ -136,18 +136,20 @@ def file_id_from_url(url: str) -> str:
 def extract_file_entry(text: str, reply_markup) -> dict | None:
     """
     Each log message has ONE inline button:
-      label = filename  (e.g. "Vladimir (2026) S01 720p WEB-DL.mkv")
-      url   = https://t.me/FilestoreBot?start=FILE_ID
+      label = filename  e.g. "Granny (2026) Tamil TRUE WEB-DL 1080p.mkv"
+      url   = https://Askmovies.lcubots.news/?start=fs_MjI2NzA=
+              OR https://t.me/FilestoreBot?start=FILE_ID
 
+    Accepts ANY https URL in the button — no domain restriction.
     Returns {display_name, quality, link, file_id} or None.
     """
-    # ── Primary: inline keyboard button ───────────────────────
+    # ── Primary: inline keyboard button (any URL) ─────────────
     if reply_markup and hasattr(reply_markup, "inline_keyboard"):
         for row in reply_markup.inline_keyboard:
             for btn in row:
                 url   = getattr(btn, "url", None)
                 label = (btn.text or "").strip()
-                if url and "t.me/" in url and label:
+                if url and url.startswith("http") and label:
                     entry = {
                         "display_name": label,
                         "quality":      quality_from_text(label),
@@ -157,8 +159,8 @@ def extract_file_entry(text: str, reply_markup) -> dict | None:
                     log.info("Button → %s | %s", label, url)
                     return entry   # one button per message
 
-    # ── Fallback: bare t.me link in text ──────────────────────
-    m = re.search(r"(https?://t\.me/\S+)", text)
+    # ── Fallback: any https link in message text ───────────────
+    m = re.search(r"(https://\S+)", text)
     if m:
         url   = m.group(1)
         first = text.splitlines()[0].strip()
@@ -171,7 +173,7 @@ def extract_file_entry(text: str, reply_markup) -> dict | None:
             "file_id":      file_id_from_url(url),
         }
 
-    log.warning("No button and no t.me link found — message skipped")
+    log.warning("No button URL found in message — skipping")
     return None
 
 
@@ -386,5 +388,5 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-              )
-  
+                            )
+                      

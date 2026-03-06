@@ -104,9 +104,14 @@ def fetch_tmdb_poster(title: str, year: int | None = None) -> str | None:
 
 
 # ── Text helpers ──────────────────────────────────────────────
+# Matches [ASK], [A|S|K], boxed-letter tags at the START of the line only
+ASK_TAG_RE = re.compile(r"^(\s*\[[A-Z|\s]{1,10}\]\s*)+", re.IGNORECASE)
+
 def clean_first_line(raw: str) -> str:
-    raw = re.sub(r"\[.*?\]", "", raw)                          # strip [ASK] tags
-    raw = re.sub(r"[^\x00-\u024F\s()\[\]\-_.]+", "", raw)     # strip emoji/non-Latin
+    # Only strip leading [ASK]-style tags, NOT language tags like [Tamil + Malayalam]
+    raw = ASK_TAG_RE.sub("", raw)
+    # Strip emoji and non-Latin characters but keep brackets, so [Tamil + Malayalam] survives
+    raw = re.sub(r"[^\x00-\u024F\s()\[\]\-_+.]+", "", raw)
     return raw.strip()
 
 
@@ -459,5 +464,4 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-                     )
-                     
+)

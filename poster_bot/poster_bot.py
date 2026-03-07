@@ -48,7 +48,7 @@ TMDB_API_KEY      = os.environ["TMDB_API_KEY"]
 LOG_CHANNEL_ID    = str(os.environ["LOG_CHANNEL_ID"])
 PUBLIC_CHANNEL_ID = str(os.environ["PUBLIC_CHANNEL_ID"])
 FILESTORE_BOT     = os.environ["FILESTORE_BOT"].lstrip("@")
-WEBHOOK_URL       = os.environ["WEBHOOK_URL"]
+WEBHOOK_URL       = os.environ.get("WEBHOOK_URL", "")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)

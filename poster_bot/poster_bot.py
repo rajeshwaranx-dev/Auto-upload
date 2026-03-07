@@ -220,15 +220,9 @@ GENERIC_LABELS = re.compile(
 
 
 def resolve_display_name(btn_label: str, meta: dict) -> str:
-    """
-    Use the button label as display name ONLY if it looks like a real filename.
-    Otherwise fall back to the filename stored in meta (from the message text).
-    """
-    # Strip emojis and leading spaces before matching
-    clean_label = re.sub(r"[^-]+", "", btn_label).strip()
-    if not GENERIC_LABELS.match(clean_label):
-        return btn_label          # label is a proper filename — use it
-    # Generic label — build display name from meta filename
+    label_ascii = "".join(c for c in btn_label if ord(c) < 128).strip()
+    if not GENERIC_LABELS.match(label_ascii):
+        return btn_label
     return meta.get("filename") or btn_label
 
 

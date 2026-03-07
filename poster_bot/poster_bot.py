@@ -224,7 +224,9 @@ def resolve_display_name(btn_label: str, meta: dict) -> str:
     Use the button label as display name ONLY if it looks like a real filename.
     Otherwise fall back to the filename stored in meta (from the message text).
     """
-    if not GENERIC_LABELS.match(btn_label):
+    # Strip emojis and leading spaces before matching
+    clean_label = re.sub(r"[^-]+", "", btn_label).strip()
+    if not GENERIC_LABELS.match(clean_label):
         return btn_label          # label is a proper filename — use it
     # Generic label — build display name from meta filename
     return meta.get("filename") or btn_label

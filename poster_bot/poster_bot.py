@@ -412,16 +412,19 @@ def build_caption(data: dict) -> str:
     )
 
 
-def already_stored(files: list[dict], file_id: str, ep: int | None, quality: str) -> bool:
+def already_stored(files: list[dict], file_id: str, ep: int | None, quality: str, display_name: str = "") -> bool:
     """
-    Deduplicate by TWO criteria (either is enough to skip):
-      1. Exact file_id match  — same file re-uploaded
-      2. Same episode + same quality — different upload of identical content
+    Deduplicate by THREE criteria (any one is enough to skip):
+      1. Exact file_id match       — same file re-uploaded
+      2. Same episode + quality    — series duplicate
+      3. Same display_name         — movie same filename re-uploaded
     """
     for f in files:
         if f.get("file_id") == file_id:
             return True
         if ep is not None and f.get("ep") == ep and f.get("quality") == quality:
+            return True
+        if display_name and f.get("display_name") == display_name:
             return True
     return False
 
@@ -488,8 +491,8 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # ── Add quality to existing public post ───────────
             data = posted[mkey]
             ep_no = ep_num(file_entry)
-            if already_stored(data["files"], file_entry["file_id"], ep_no, file_entry["quality"]):
-                log.info("⏭ Duplicate ep=%s quality=%s for %r — skipping", ep_no, file_entry["quality"], title)
+            if already_stored(data["files"], file_entry["file_id"], ep_no, file_entry["quality"], file_entry.get("display_name", "")):
+                log.info("⏭ Duplicate ep=%s quality=%s name=%r for %r — skipping", ep_no, file_entry["quality"], file_entry.get("display_name",""), title)
                 return
             data["files"].append(file_entry)
 
@@ -575,4 +578,4 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-  )
+      )

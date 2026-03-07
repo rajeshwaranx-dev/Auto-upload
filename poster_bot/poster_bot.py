@@ -440,8 +440,11 @@ def already_stored(files: list[dict], file_id: str, ep: int | None, quality: str
     return False
 
 
-def movie_key_for(title: str, year, languages: list) -> str:
-    # Include primary language so Telugu/Hindi variants get separate posts
+def movie_key_for(title: str, year, languages: list, is_series: bool = False) -> str:
+    # For series: key = title + year only (all langs/qualities go in one post)
+    # For movies: key = title + year + primary_lang (separate post per language)
+    if is_series:
+        return re.sub(r"\s+", "_", f"{title}_{year or ''}".lower())
     lang = languages[0].lower() if languages else "unknown"
     return re.sub(r"\s+", "_", f"{title}_{year or ''}_{lang}".lower())
 
@@ -495,7 +498,7 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     title     = meta["title"]
     year      = meta.get("year")
-    mkey      = movie_key_for(title, year, meta.get("languages", []))
+    mkey      = movie_key_for(title, year, meta.get("languages", []), meta.get("is_series", False))
 
     async with state_lock:
         if mkey in posted:
@@ -589,4 +592,5 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-                  )
+)
+              

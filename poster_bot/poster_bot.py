@@ -259,11 +259,6 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
                     # Store ep number for dedup
                     ep_m = EP_RE.search(display)
                     entry["ep"] = int(ep_m.group(1) or ep_m.group(2)) if ep_m else None
-                    # Also grab workers.dev fast download link from caption if present
-                    fdl = re.search(r"https?://(?:www\.)?askmovies\.workers\.dev/\S+", text)
-                    if fdl:
-                        entry["fast_link"] = fdl.group(0)
-                        log.info("Fast download link found: %s", entry["fast_link"])
                     return entry
 
     log.warning("No button URL on edited message — cannot get file link")
@@ -385,11 +380,7 @@ def build_caption(data: dict) -> str:
     if is_series and has_ep_files:
         # ── Series format: EP01 : 480P | 720P | 1080P ─────────
         file_lines, batch_str = build_series_file_lines(files)
-        fast_links_html = ""
-        all_fast = [f.get("fast_link") for f in files if f.get("fast_link")]
-        if all_fast:
-            fast_links_html = "\n" + "\n".join(f'<b>⚡ Fast Download: <a href="{fl}">{fl}</a></b>' for fl in dict.fromkeys(all_fast))
-        batch_section = f'📦 Get all files for: {batch_str}' + fast_links_html
+        batch_section = f'📦 Get all files for: {batch_str}'
     else:
         # ── Movie format: one 🔥 line per file ─────────────────
         file_parts = []
@@ -400,11 +391,7 @@ def build_caption(data: dict) -> str:
         file_lines = "\n\n".join(file_parts)
         if file_lines:
             file_lines = "\n" + file_lines
-        fast_links_html = ""
-        all_fast = [f.get("fast_link") for f in files_sorted if f.get("fast_link")]
-        if all_fast:
-            fast_links_html = "\n" + "\n".join(f'<b>⚡ Fast Download: <a href="{fl}">{fl}</a></b>' for fl in dict.fromkeys(all_fast))
-        batch_section = f'📦 Get all files in one link: <a href="{batch_link}">Click Here</a>' + fast_links_html
+        batch_section = f'📦 Get all files in one link: <a href="{batch_link}">Click Here</a>'
 
     return (
         f'<a href="https://t.me/{FILESTORE_BOT}"><b>AskMovies</b></a>\n'

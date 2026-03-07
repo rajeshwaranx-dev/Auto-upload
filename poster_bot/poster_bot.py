@@ -324,13 +324,13 @@ def build_series_file_lines(files: list[dict]) -> tuple[str, str]:
             key=lambda x: QUALITY_ORDER.get(x[0], 99),
         )
         qual_links = " | ".join(f'<a href="{lnk}">{q}</a>' for q, lnk in quals)
-        parts.append(f"🌊 <b>EP{ep:02d}</b> : {qual_links}")
+        parts.append(f"<b>🌊 EP{ep:02d} : {qual_links}</b>")
 
     # Files without episode number (movies mixed in)
     for f in no_ep:
         label = f.get("display_name") or f.get("quality", "HD")
         lnk = f['link']
-        parts.append(f'🔥 <a href="{lnk}">{label}</a>')
+        parts.append(f'<b>🔥 <a href="{lnk}">{label}</a></b>')
 
     # Episodes: single newline (no blank line between them)
     # no_ep files (batch packs): double newline
@@ -382,7 +382,7 @@ def build_caption(data: dict) -> str:
     if is_series:
         sm = re.search(r"S(\d{1,2})", filename, re.IGNORECASE)
         if sm:
-            season_line = f"\n💫 <b>Season:</b> {int(sm.group(1))}"
+            season_line = f"\n💫 <b>Season: {int(sm.group(1))}</b>"
 
     # Also detect series from file display_names (e.g. S01E03 in filename)
     has_ep_files = any(ep_num(f) is not None for f in files)
@@ -395,31 +395,31 @@ def build_caption(data: dict) -> str:
     if is_series and has_ep_files:
         # ── Series format: EP01 : 480P | 720P | 1080P ─────────
         file_lines, batch_str = build_series_file_lines(files)
-        batch_section = f'📦 <b>Get all files for:</b> {batch_str}'
+        batch_section = f'📦 Get all files for: {batch_str}'
     else:
         # ── Movie format: one 🔥 line per file ─────────────────
         file_parts = []
         for f in files_sorted:
             label = f.get("display_name") or f.get("quality", "HD")
             lnk2 = f['link']
-            file_parts.append(f'🔥 <a href="{lnk2}">{label}</a>')
+            file_parts.append(f'<b>🔥 <a href="{lnk2}">{label}</a></b>')
         file_lines = "\n\n".join(file_parts)
         if file_lines:
             file_lines = "\n" + file_lines
-        batch_section = f'📦 <b>Get all files in one link:</b> <a href="{batch_link}">Click Here</a>'
+        batch_section = f'📦 Get all files in one link: <a href="{batch_link}">Click Here</a>'
 
     return (
         f'<a href="https://t.me/{FILESTORE_BOT}"><b>AskMovies</b></a>\n'
-        f"🎬 <b>Title:</b> {title}\n"
-        f"📅 <b>Year :</b> {year or 'N/A'}"
+        f"🎬 <b>Title: {title}</b>\n"
+        f"📅 <b>Year : {year or 'N/A'}</b>"
         f"{season_line}\n"
-        f"🎞 <b>Quality:</b> {quality_label}\n"
-        f"🎧 <b>Audio:</b> {audio_str}\n\n"
-        "🔺<b>Telegram File</b>🔻\n"
+        f"🎞 <b>Quality: {quality_label}</b>\n"
+        f"🎧 <b>Audio: {audio_str}</b>\n\n"
+        "<b>🔺Telegram File🔻</b>\n"
         f"{file_lines}\n\n"
-        f"{batch_section}\n\n"
-        "Note 💢: If the link is not working, copy it and paste it into your browser.\n\n"
-        f"❤️Join » @{FILESTORE_BOT}"
+        f"<b>{batch_section}</b>\n\n"
+        "<b>Note 💢: If the link is not working, copy it and paste it into your browser.</b>\n\n"
+        f"<b>❤️Join » @{FILESTORE_BOT}</b>"
     )
 
 

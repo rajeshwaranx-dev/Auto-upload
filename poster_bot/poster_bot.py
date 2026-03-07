@@ -239,12 +239,16 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
                     if not quality or quality == "HD":
                         quality = meta.get("quality") or "HD"
                     log.info("Button → display=%r quality=%s url=%s", display, quality, url)
-                    return {
+                    entry = {
                         "display_name": display,
                         "quality":      quality,
                         "link":         url,
                         "file_id":      file_id_from_url(url),
                     }
+                    # Store ep number for dedup
+                    ep_m = EP_RE.search(display)
+                    entry["ep"] = int(ep_m.group(1)) if ep_m else None
+                    return entry
 
     # Fallback: any https link in text
     m = re.search(r"(https://\S+)", text)
@@ -252,11 +256,13 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
         url   = m.group(1)
         label = meta.get("filename") or url
         log.info("Text fallback → label=%r url=%s", label, url)
+        ep_m = EP_RE.search(label)
         return {
             "display_name": label,
             "quality":      meta.get("quality", "HD"),
             "link":         url,
             "file_id":      file_id_from_url(url),
+            "ep":           int(ep_m.group(1)) if ep_m else None,
         }
 
     log.warning("No button URL on edited message — cannot get file link")
@@ -385,8 +391,18 @@ def build_caption(data: dict) -> str:
     )
 
 
-def already_stored(files: list[dict], file_id: str) -> bool:
-    return any(f.get("file_id") == file_id for f in files)
+def already_stored(files: list[dict], file_id: str, ep: int | None, quality: str) -> bool:
+    """
+    Deduplicate by TWO criteria (either is enough to skip):
+      1. Exact file_id match  — same file re-uploaded
+      2. Same episode + same quality — different upload of identical content
+    """
+    for f in files:
+        if f.get("file_id") == file_id:
+            return True
+        if ep is not None and f.get("ep") == ep and f.get("quality") == quality:
+            return True
+    return False
 
 
 def movie_key_for(title: str, year, languages: list) -> str:
@@ -450,8 +466,9 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if mkey in posted:
             # ── Add quality to existing public post ───────────
             data = posted[mkey]
-            if already_stored(data["files"], file_entry["file_id"]):
-                log.info("⏭ Duplicate file_id for %r", title)
+            ep_no = ep_num(file_entry)
+            if already_stored(data["files"], file_entry["file_id"], ep_no, file_entry["quality"]):
+                log.info("⏭ Duplicate ep=%s quality=%s for %r — skipping", ep_no, file_entry["quality"], title)
                 return
             data["files"].append(file_entry)
 
@@ -537,5 +554,4 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-)
-  
+  )

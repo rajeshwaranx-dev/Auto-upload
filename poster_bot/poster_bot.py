@@ -577,11 +577,7 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ── Entry point ───────────────────────────────────────────────
 if __name__ == "__main__":
-    port         = int(os.environ.get("PORT", 8000))
-    webhook_path = f"/webhook/{BOT_TOKEN}"
-    full_webhook = f"{WEBHOOK_URL.rstrip('/')}{webhook_path}"
-
-    log.info("🤖 AskMovies Poster Bot starting (webhook) on port %d", port)
+    use_webhook = bool(os.environ.get("WEBHOOK_URL", "").strip())
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -589,9 +585,17 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL & ~filters.UpdateType.EDITED, handle_channel_post))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.UpdateType.EDITED, handle_edited_post))
 
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=webhook_path,
-        webhook_url=full_webhook,
-    )
+    if use_webhook:
+        port         = int(os.environ.get("PORT", 8000))
+        webhook_path = f"/webhook/{BOT_TOKEN}"
+        full_webhook = f"{os.environ['WEBHOOK_URL'].rstrip('/')}{webhook_path}"
+        log.info("🤖 AskMovies Poster Bot starting (webhook) on port %d", port)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=webhook_path,
+            webhook_url=full_webhook,
+        )
+    else:
+        log.info("🤖 AskMovies Poster Bot starting (polling)")
+        app.run_polling(drop_pending_updates=True)

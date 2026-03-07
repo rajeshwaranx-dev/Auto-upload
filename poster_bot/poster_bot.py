@@ -121,13 +121,21 @@ def extract_title_year(filename: str) -> tuple[str, int | None]:
         r"\b(WEB-DL|HDRip|BluRay|WEBRip|HDCAM|480p|720p|1080p|4K|HQ|CAMRip|TRUE)\b",
         re.IGNORECASE,
     )
+    # Episode pattern — split title here so episode titles don't bleed in
+    EP_SPLIT  = re.compile(r"\bS\d{1,2}\s*E(?:P)?\d+\b|\bEP?\s*\d{1,3}\b", re.IGNORECASE)
+
     year: int | None = None
     m = YEAR_RE.search(filename)
     if m:
         year      = int(m.group(1) or m.group(2))
         title_raw = filename[: m.start()]
     else:
-        title_raw = SPLIT_PAT.split(filename)[0]
+        # Try splitting on episode pattern first, then quality keywords
+        ep_m = EP_SPLIT.search(filename)
+        if ep_m:
+            title_raw = filename[: ep_m.start()]
+        else:
+            title_raw = SPLIT_PAT.split(filename)[0]
 
     title = re.sub(r"[_\-]+", " ", title_raw)
     title = re.sub(r"\.(mkv|mp4|avi|mov)$", "", title, flags=re.IGNORECASE)
@@ -578,4 +586,4 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-      )
+  )

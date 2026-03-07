@@ -247,7 +247,7 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
                     }
                     # Store ep number for dedup
                     ep_m = EP_RE.search(display)
-                    entry["ep"] = int(ep_m.group(1)) if ep_m else None
+                    entry["ep"] = int(ep_m.group(1) or ep_m.group(2)) if ep_m else None
                     return entry
 
     # Fallback: any https link in text
@@ -575,4 +575,4 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-    )
+  )

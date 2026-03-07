@@ -270,12 +270,17 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
 
 
 # ── Episode extractor ────────────────────────────────────────
-EP_RE = re.compile(r"\bEP?\s*(\d{1,3})\b", re.IGNORECASE)
+EP_RE = re.compile(r"\bS\d{1,2}E(\d{1,3})\b|\bEP?\s*(\d{1,3})\b", re.IGNORECASE)
 
 def ep_num(f: dict) -> int | None:
-    """Return episode number from display_name, or None."""
+    """Return episode number from display_name, or None.
+    Handles both EP03 and S01E03 formats.
+    """
     m = EP_RE.search(f.get("display_name") or "")
-    return int(m.group(1)) if m else None
+    if not m:
+        return None
+    # group(1) = SxxExx capture, group(2) = EP/E capture
+    return int(m.group(1) or m.group(2))
 
 
 def build_series_file_lines(files: list[dict]) -> tuple[str, str]:
@@ -368,7 +373,15 @@ def build_caption(data: dict) -> str:
         if sm:
             season_line = f"\n💫 <b>Season:</b> {int(sm.group(1))}"
 
-    if is_series and any(ep_num(f) is not None for f in files):
+    # Also detect series from file display_names (e.g. S01E03 in filename)
+    has_ep_files = any(ep_num(f) is not None for f in files)
+    if not has_ep_files:
+        # Check display_name for SxxExx pattern too
+        has_ep_files = any(
+            re.search(r"S\d{1,2}E\d{1,3}", f.get("display_name",""), re.IGNORECASE)
+            for f in files
+        )
+    if is_series and has_ep_files:
         # ── Series format: EP01 : 480P | 720P | 1080P ─────────
         file_lines, batch_str = build_series_file_lines(files)
         batch_section = f'📦 <b>Get all files for:</b> {batch_str}'
@@ -387,7 +400,7 @@ def build_caption(data: dict) -> str:
     return (
         f'<a href="https://t.me/{FILESTORE_BOT}"><b>AskMovies</b></a>\n'
         f"🎬 <b>Title:</b> {title}\n"
-        f"📅 <b>Year :</b> {year}"
+        f"📅 <b>Year :</b> {year or 'N/A'}"
         f"{season_line}\n"
         f"🎞 <b>Quality:</b> {quality_label}\n"
         f"🎧 <b>Audio:</b> {audio_str}\n\n"
@@ -562,4 +575,4 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-  )
+    )

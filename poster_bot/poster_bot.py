@@ -196,7 +196,10 @@ def parse_initial_message(text: str) -> dict | None:
         fn_lower = first_line.lower()
         languages = [name for abbr, name in LANG_MAP.items() if abbr in fn_lower]
 
-    is_series = bool(re.search(r"\bS\d{1,2}\s*E?P?\d+\b", first_line, re.IGNORECASE))
+    is_series = bool(
+        re.search(r"\bS\d{1,2}\s*E?P?\d+\b", first_line, re.IGNORECASE) or
+        re.search(r"\bEP?\s*\(?\d", first_line, re.IGNORECASE)   # EP01 or EP (01-08)
+    )
 
     return {
         "title":         title,
@@ -586,4 +589,4 @@ if __name__ == "__main__":
         port=port,
         url_path=webhook_path,
         webhook_url=full_webhook,
-  )
+                  )

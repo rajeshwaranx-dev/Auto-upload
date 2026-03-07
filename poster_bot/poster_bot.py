@@ -316,7 +316,15 @@ def build_series_file_lines(files: list[dict]) -> tuple[str, str]:
         lnk = f['link']
         parts.append(f'🔥 <a href="{lnk}">{label}</a>')
 
-    file_lines = "\n\n".join(parts)
+    # Episodes: single newline (no blank line between them)
+    # no_ep files (batch packs): double newline
+    ep_parts  = [p for p in parts if p.startswith("🌊")]
+    nep_parts = [p for p in parts if not p.startswith("🌊")]
+    combined  = []
+    if ep_parts:
+        combined.append("\n".join(ep_parts))
+    combined.extend(nep_parts)
+    file_lines = "\n\n".join(combined)
     if file_lines:
         file_lines = "\n" + file_lines
 
@@ -377,13 +385,13 @@ def build_caption(data: dict) -> str:
         batch_section = f'📦 <b>Get all files in one link:</b> <a href="{batch_link}">Click Here</a>'
 
     return (
-        "<b>AskMovies</b>\n"
+        f'<a href="https://t.me/{FILESTORE_BOT}"><b>AskMovies</b></a>\n'
         f"🎬 <b>Title:</b> {title}\n"
         f"📅 <b>Year :</b> {year}"
         f"{season_line}\n"
         f"🎞 <b>Quality:</b> {quality_label}\n"
         f"🎧 <b>Audio:</b> {audio_str}\n\n"
-        "🔺<b>Telegram File</b>🔻"
+        "🔺<b>Telegram File</b>🔻\n"
         f"{file_lines}\n\n"
         f"{batch_section}\n\n"
         "Note 💢: If the link is not working, copy it and paste it into your browser.\n\n"

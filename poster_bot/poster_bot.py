@@ -214,7 +214,7 @@ def parse_initial_message(text: str) -> dict | None:
 
 # Generic button labels that carry no useful filename info
 GENERIC_LABELS = re.compile(
-    r"^(get\s+shar(e?able|ing)|download|click\s+here|open|get\s+file|watch|stream)\b",
+    r"^[\W\s]*(get\s+shar(e?able|ing)|download|click\s+here|open|get\s+file|watch|stream)\b",
     re.IGNORECASE,
 )
 

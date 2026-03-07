@@ -479,9 +479,11 @@ async def handle_edited_post(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not meta:
             return
 
+    log.info("🔍 meta filename=%r", meta.get("filename"))
     file_entry = extract_button_entry(text, reply_markup, meta)
     if not file_entry:
         return
+    log.info("🔍 file_entry display_name=%r", file_entry.get("display_name"))
 
     title     = meta["title"]
     year      = meta.get("year")

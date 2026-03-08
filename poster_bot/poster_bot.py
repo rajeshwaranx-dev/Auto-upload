@@ -296,32 +296,17 @@ def build_series_file_lines(files: list[dict]) -> tuple[str, str]:
         else:
             no_ep.append(f)
 
-    parts = []
-
-    # Episode grouped lines
+    # Episode grouped lines only (skip no_ep batch packs in file lines)
+    ep_parts = []
     for ep in sorted(episodes.keys()):
         quals = sorted(
             episodes[ep],
             key=lambda x: QUALITY_ORDER.get(x[0], 99),
         )
         qual_links = " | ".join(f'<a href="{lnk}">{q}</a>' for q, lnk in quals)
-        parts.append(f"<b>🌊 EP{ep:02d} : {qual_links}</b>")
+        ep_parts.append(f"<b>🌊 EP{ep:02d} : {qual_links}</b>")
 
-    # Files without episode number (movies mixed in)
-    for f in no_ep:
-        label = f.get("display_name") or f.get("quality", "HD")
-        lnk = f['link']
-        parts.append(f'<b>🔥 <a href="{lnk}">{label}</a></b>')
-
-    # Episodes: single newline (no blank line between them)
-    # no_ep files (batch packs): double newline
-    ep_parts  = [p for p in parts if p.startswith("🌊")]
-    nep_parts = [p for p in parts if not p.startswith("🌊")]
-    combined  = []
-    if ep_parts:
-        combined.append("\n".join(ep_parts))
-    combined.extend(nep_parts)
-    file_lines = "\n\n".join(combined)
+    file_lines = "\n".join(ep_parts)
     if file_lines:
         file_lines = "\n" + file_lines
 

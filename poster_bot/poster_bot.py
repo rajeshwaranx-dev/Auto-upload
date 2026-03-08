@@ -183,13 +183,12 @@ def msg_id_from_start(start: str, channel_id: int) -> int | None:
 
 
 def build_batch_link(msg_ids: list, channel_id: int, bot_username: str) -> str:
-    """Build a batch filestore link for a list of message IDs."""
+    """Build a batch filestore link using batch-ID1_ID2_ID3 format."""
     if not msg_ids:
         return f"https://t.me/{bot_username}"
     sorted_ids = sorted(msg_ids)
-    start_enc = sorted_ids[0] * abs(channel_id)
-    end_enc = sorted_ids[-1] * abs(channel_id)
-    param = encode_start_param(f"get-{start_enc}-{end_enc}")
+    encoded_ids = "_".join(str(mid * abs(channel_id)) for mid in sorted_ids)
+    param = encode_start_param("batch-" + encoded_ids)
     return f"https://t.me/{bot_username}?start={param}"
 
 

@@ -29,6 +29,7 @@ Log message format (one message per quality):
 
 import os
 import re
+import base64
 import logging
 import asyncio
 
@@ -155,6 +156,43 @@ def file_id_from_url(url: str) -> str:
     return m.group(1) if m else url
 
 
+def decode_start_param(start: str) -> str:
+    """Decode base64 start parameter from filestore bot URL."""
+    try:
+        s = start + "=" * (4 - len(start) % 4)
+        return base64.b64decode(s).decode()
+    except Exception:
+        return ""
+
+
+def encode_start_param(s: str) -> str:
+    """Encode string to base64 start parameter."""
+    return base64.b64encode(s.encode()).decode().rstrip("=")
+
+
+def msg_id_from_start(start: str, channel_id: int) -> int | None:
+    """Extract message ID from a filestore bot start parameter like get-XXXXXXX."""
+    decoded = decode_start_param(start)
+    parts = decoded.split("-")
+    if len(parts) == 2 and parts[0] == "get":
+        try:
+            return int(int(parts[1]) / abs(channel_id))
+        except Exception:
+            return None
+    return None
+
+
+def build_batch_link(msg_ids: list, channel_id: int, bot_username: str) -> str:
+    """Build a batch filestore link for a list of message IDs."""
+    if not msg_ids:
+        return f"https://t.me/{bot_username}"
+    sorted_ids = sorted(msg_ids)
+    start_enc = sorted_ids[0] * abs(channel_id)
+    end_enc = sorted_ids[-1] * abs(channel_id)
+    param = encode_start_param(f"get-{start_enc}-{end_enc}")
+    return f"https://t.me/{bot_username}?start={param}"
+
+
 # ── Parse the initial (text-only) channel_post ───────────────
 def parse_initial_message(text: str) -> dict | None:
     """
@@ -246,11 +284,13 @@ def extract_button_entry(text: str, reply_markup, meta: dict) -> dict | None:
                     if not quality or quality == "HD":
                         quality = meta.get("quality") or "HD"
                     log.info("Button → display=%r quality=%s url=%s", display, quality, url)
+                    fid = file_id_from_url(url)
                     entry = {
                         "display_name": display,
                         "quality":      quality,
                         "link":         url,
-                        "file_id":      file_id_from_url(url),
+                        "file_id":      fid,
+                        "msg_id":       msg_id_from_start(fid, int(os.environ.get("LOG_CHANNEL_ID", "0"))),
                     }
                     # Store ep number for dedup
                     ep_m = EP_RE.search(display)
@@ -310,14 +350,30 @@ def build_series_file_lines(files: list[dict]) -> tuple[str, str]:
     if file_lines:
         file_lines = "\n" + file_lines
 
-    # Batch line: all unique qualities as links to highest-quality file each
-    best: dict = {}
+    # Batch line: per quality, build batch link using all msg_ids of that quality
+    channel_id = int(os.environ.get("LOG_CHANNEL_ID", "0"))
+    quality_msg_ids: dict = {}
     for f in files:
         q = f.get("quality", "HD")
-        if q not in best or QUALITY_ORDER.get(q, 99) > QUALITY_ORDER.get(best[q].get("quality",""), 99):
-            best[q] = f
-    batch_parts = sorted(best.values(), key=lambda f: QUALITY_ORDER.get(f.get("quality",""), 99))
-    batch_str = " | ".join('<a href="' + f['link'] + '">' + f.get("quality","HD") + '</a>' for f in batch_parts)
+        mid = f.get("msg_id")
+        if mid:
+            quality_msg_ids.setdefault(q, []).append(mid)
+
+    if quality_msg_ids:
+        batch_parts = sorted(quality_msg_ids.keys(), key=lambda q: QUALITY_ORDER.get(q, 99))
+        batch_str = " | ".join(
+            '<a href="' + build_batch_link(quality_msg_ids[q], channel_id, FILESTORE_BOT) + '">' + q + '</a>'
+            for q in batch_parts
+        )
+    else:
+        # fallback: use individual file links
+        best: dict = {}
+        for f in files:
+            q = f.get("quality", "HD")
+            if q not in best:
+                best[q] = f
+        batch_parts2 = sorted(best.values(), key=lambda f: QUALITY_ORDER.get(f.get("quality",""), 99))
+        batch_str = " | ".join('<a href="' + f['link'] + '">' + f.get("quality","HD") + '</a>' for f in batch_parts2)
 
     return file_lines, batch_str
 
